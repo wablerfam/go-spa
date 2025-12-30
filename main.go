@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -19,11 +20,19 @@ func (a *myApp) OnMount(ctx app.Context) {
 
 func (a *myApp) onRun(ctx app.Context, e app.Event) {
 	ctx.Async(func() {
-		ctx.SetState("status", "pushed")
-		time.Sleep(1 * time.Second)
-		ctx.SetState("status", "pushed\nloading")
-		time.Sleep(1 * time.Second)
-		ctx.SetState("status", "pushed\nloading\nended")
+		es := app.Window().Get("EventSource").New("/api/stream")
+		es.Set("onmessage", app.FuncOf(func(this app.Value, args []app.Value) any {
+			data := args[0].Get("data").String()
+			ctx.Dispatch(func(ctx app.Context) {
+				a.status += data + "\n"
+				ctx.SetState("status", a.status)
+			})
+			return nil
+		}))
+		es.Set("onerror", app.FuncOf(func(this app.Value, args []app.Value) any {
+			es.Call("close")
+			return nil
+		}))
 	})
 }
 
@@ -35,10 +44,30 @@ func (a *myApp) Render() app.UI {
 	)
 }
 
+func sseHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	messages := []string{"pushed", "loading", "ended"}
+	for _, msg := range messages {
+		fmt.Fprintf(w, "data: %s\n\n", msg)
+		flusher.Flush()
+		time.Sleep(1 * time.Second)
+	}
+}
+
 func main() {
 	app.Route("/", func() app.Composer { return &myApp{} })
 	app.RunWhenOnBrowser()
 
+	http.HandleFunc("/api/stream", sseHandler)
 	http.Handle("/", &app.Handler{
 		Name:        "go-app Demo",
 		Description: "A simple go-app demo",
